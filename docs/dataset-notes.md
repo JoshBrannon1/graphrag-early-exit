@@ -56,6 +56,45 @@ By contrast `wrong_answer` runs finish in ~7 steps with median observation-level
 recall of 1.0: they saw every correct node and submitted the wrong subset. Early exit
 cannot help those.
 
+## Turn cap
+
+`len(trajectory) == 52` means the run hit the 50-turn cap: 51 agent steps plus the
+final submit. No run in any split is longer. The invariant is the cap, not the reject
+reason:
+
+| split | turn-capped | of which `no_submit_answer` | other |
+| --- | --- | --- | --- |
+| train | 582 | 582 | — |
+| valid | 151 | 150 | qid 2186 (`timeout`) |
+| test | 172 | 171 | qid 1122 (`missing_think_graph_format`) |
+
+The final step's `valid_action is None` iff the run is turn-capped, in every split.
+
+**Step-51 artifact.** Step 51 of a turn-capped run is the action generated at the cap
+and never executed, so its observation is empty. That holds for every
+`no_submit_answer` run and for test qid 1122. Valid qid 2186 is the exception: its last
+steps are malformed outputs, so step 51's observation is a malformed-output error
+message instead. No other run has an empty observation anywhere, and no empty
+observation occurs mid-run — so an empty observation in a prefix identifies a looper.
+
+## Prefix instances
+
+`src/data/build_dataset.py` writes one instance per (trajectory, prefix ending at step
+`t`), with `len(steps) == t`. It drops the final step, then a trailing
+empty-observation step (the step-51 artifact). Mid-run `submit_answer` calls (failed,
+`valid_action=0`; 5 train, 2 test trajectories) stay as ordinary steps.
+
+| split | trajectories | instances |
+| --- | --- | --- |
+| train | 2000 | 39,679 |
+| valid | 500 | 9,960 |
+| test | 500 | 10,893 |
+
+`label_looping` = ran to the turn cap (raw `len(trajectory) == 52`), because early exit
+targets wasted compute. It equals `reject_reason == "no_submit_answer"` except for valid
+qid 2186 and test qid 1122. Instance-level positive rate: 73.3% train, 75.8% valid.
+These counts and the turn-capped breakdown are printed by `python -m src.data.build_dataset`.
+
 ## What `accepted` measures
 
 Exact-set match, not ranking quality:
@@ -78,8 +117,9 @@ partly scores BM25's luck.
 
 ## Known leaks
 
-1. `len(trajectory) == 52` iff `no_submit_answer` — no exceptions.
-2. Final step `valid_action is None` iff `no_submit_answer` — 582/582.
+1. `len(trajectory) == 52` iff the run hit the turn cap — no exceptions in any split
+   (see [Turn cap](#turn-cap)). In train this is exactly `no_submit_answer`.
+2. Final step `valid_action is None` iff turn-capped — 582 / 151 / 172.
 3. All 2000 trajectories end in `submit_answer`, including the 582 that never submitted
    (the last step is synthetic, appended during cleaning).
 4. `observed_node_ids` / `observed_target_node_ids` aggregate the whole trajectory.
@@ -88,6 +128,9 @@ partly scores BM25's luck.
    be a byproduct of seeding from visited nodes, since `no_submit_answer` trajectories
    observe only ~50% of their gold on average. Seeds also include nodes first observed
    late in the run (39/40 sampled), so they leak the future as well.
+6. An empty observation appears only at step 51 of a turn-capped run (the unexecuted
+   action at the cap). The builder drops it; the leak test asserts no prefix has one.
+   Left in, `n_empty_observations` was the baseline's largest coefficient.
 
 ## Sequence length
 
