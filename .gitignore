@@ -1,10 +1,10 @@
 .venv/
 __pycache__/
 *.pyc
-data/
+/data/
 *.jsonl
 *.parquet
-checkpoints/
-runs/
-wandb/
+/checkpoints/
+/runs/
+/wandb/
 .ipynb_checkpoints/
