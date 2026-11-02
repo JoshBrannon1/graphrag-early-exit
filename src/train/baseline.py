@@ -2,7 +2,7 @@
 
 Trains on train, evaluates on valid. Never reads test.
 
-Usage: python -m src.train.baseline [--label label_looping] [--early-t 10]
+Usage: python -m src.train.baseline --label LABEL [--early-t 10]
 """
 
 import argparse
@@ -14,7 +14,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from src.data.build_dataset import DEFAULT_OUT_DIR
+from src.data.build_dataset import BINARY_LABELS, DEFAULT_OUT_DIR
 from src.features import featurize
 
 FEATURIZER = "hand"
@@ -50,12 +50,12 @@ def scores(y, score):
 
 def subset_header(trivial_names):
     trivial = " | ".join(f"{n} PR-AUC | {n} ROC-AUC" for n in trivial_names)
-    return f"subset | n | pos_rate | model PR-AUC | model ROC-AUC | {trivial}"
+    return f"label | subset | n | pos_rate | model PR-AUC | model ROC-AUC | {trivial}"
 
 
-def subset_line(name, y, model_score, trivial_scores):
+def subset_line(label, name, y, model_score, trivial_scores):
     cols = [f"{v:.3f}" for s in (model_score, *trivial_scores) for v in scores(y, s)]
-    return " | ".join([name, str(len(y)), f"{y.mean():.3f}", *cols])
+    return " | ".join([label, name, str(len(y)), f"{y.mean():.3f}", *cols])
 
 
 def per_t_lines(y, t, model_score, dup_score, max_t, min_class):
@@ -82,7 +82,7 @@ def coefficients(model, names):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--label", default="label_looping")
+    parser.add_argument("--label", choices=BINARY_LABELS, required=True)
     parser.add_argument("--early-t", type=int, default=10)
     parser.add_argument("--data-dir", type=type(DEFAULT_OUT_DIR), default=DEFAULT_OUT_DIR)
     args = parser.parse_args()
@@ -98,8 +98,8 @@ def main():
 
     print(f"label={args.label}  train n={len(y_tr)} pos_rate={y_tr.mean():.3f}")
     print(subset_header(TRIVIAL_FEATURES))
-    print(subset_line("valid_all", y_va, model_score, trivial))
-    print(subset_line(f"valid_t<={args.early_t}", y_va[early], model_score[early], [s[early] for s in trivial]))
+    print(subset_line(args.label, "valid_all", y_va, model_score, trivial))
+    print(subset_line(args.label, f"valid_t<={args.early_t}", y_va[early], model_score[early], [s[early] for s in trivial]))
     print()
     dup = X_va[:, names.index("duplicate_action_rate")]
     print("\n".join(per_t_lines(y_va, t_va, model_score, dup, args.early_t, MIN_CLASS_COUNT)))

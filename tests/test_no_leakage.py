@@ -248,6 +248,6 @@ def test_detectors_catch_planted_leaks(sample):
         f"future-text detector missed planted trajectory[t] (qid={row['qid']} t={row['t']})"
     )
 
-    features = dict(model_inputs(row), nested={"seed_ids": [], "label_looping": True})
+    features = dict(model_inputs(row), nested={"seed_ids": [], "label_hits_cap": True})
     hits = {k for _, k in forbidden_hits(features, forbidden_keys())}
-    assert hits == {"seed_ids", "label_looping"}, f"forbidden-key detector returned {hits}"
+    assert hits == {"seed_ids", "label_hits_cap"}, f"forbidden-key detector returned {hits}"

@@ -86,28 +86,45 @@ mid-run, so no instance may contain one. Every instance must satisfy `len(steps)
 
 Expected instance counts: train 39,679 · valid 9,960 · test 10,893.
 
-### 3. Labels
+### 3. Target and labels
 
-Compute **all four** as separate columns in the instance files. Never let any of them
-reach the feature builder. All four are trajectory-level outcomes, repeated on every
-prefix of that trajectory — that is intended.
+**Target:** will the search observe at least one gold node? "Observed" means a gold id
+appears in the observation of a **kept** step (one that appears in prefixes; see §2).
+Early exit is a **forced submit**: BM25 over every observed paper node, submitted nodes
+first. So exiting at step `t` costs only a *first* gold sighting that would have come
+after `t`.
 
-| Column | Definition | Positive rate (trajectories) | Positive rate (instances, train) |
-| --- | --- | --- | --- |
-| `label_accepted` | `quality.accepted` — exact-set match | 10.55% | 3.2% |
-| `label_hit1` | `final_answer.ranked_node_ids[0]` in gold | 41.5% | 21.3% |
-| `label_observed_gold` | any gold id appears in any observation | — | 59.0% |
-| `label_looping` | ran to the turn cap: raw `len(trajectory) == 52` | 29.1% | 73.3% |
+Keep three layers distinct:
+1. **Labels** — deterministic, computed by the builder from the full trajectory and gold.
+2. **Model scores** — learned from `model_inputs(row)` only.
+3. **Policy** — a rule on scores (warmup, stride, threshold, patience), evaluated by replay.
+
+| Column | Level | Definition | Positive (trajectories, train) | Positive (instances, train) |
+| --- | --- | --- | --- | --- |
+| `label_first_gold_step` | trajectory, oracle metadata | smallest kept `step` whose observation contains a gold id, else null | median 2, p90 5, max 40 | — |
+| `label_ever_finds_gold` | trajectory | `label_first_gold_step is not None` | 1,409 (70.45%) | 59.0% |
+| `label_gold_still_ahead` | prefix | `label_ever_finds_gold and t < label_first_gold_step` | — | 2,580 (6.5%) |
+| `label_submits_gold` | trajectory | `set(map(str, final_answer.submitted_node_ids))` ∩ gold ≠ ∅ | 923 (46.15%) | 14.9% |
+| `label_hits_cap` | trajectory | ran to the turn cap: raw `len(trajectory) == 52` | 582 (29.1%) | 73.3% |
+| `label_accepted` | trajectory | `quality.accepted`, exact-set match | 211 (10.55%) | 3.2% |
+| `label_hit1` | trajectory | `final_answer.ranked_node_ids[0]` in gold | 41.5% | 21.3% |
 
 Instance-level rates differ from trajectory-level because long trajectories contribute
-more prefixes — a looping run contributes 50.
+more prefixes — a turn-capped run contributes 50. `python -m src.data.build_dataset`
+prints every number in this table.
 
-`label_looping` targets wasted compute, so it is defined by the turn cap, not the reject
-reason. Labels may read the full trajectory; features still may not. It equals
-`reject_reason == "no_submit_answer"` except for valid qid 2186 and test qid 1122.
+**Every `label_*` column is oracle information and never model input** — including
+`label_first_gold_step`. Labels may read gold ids and the full trajectory; `model_inputs`
+and featurizers may not. The leak tests deny any key starting with `label_`.
 
-Which label is the project's target is **unresolved** — awaiting Dr. Wang. Default to
-`label_looping` for now. Do not hardcode a single label anywhere; take it as a parameter.
+First-sighting matching lives in one helper, `build_dataset.first_gold_step`, using
+`ids_in_text`. `label_submits_gold` implies `label_ever_finds_gold` (submitted ⊂ found).
+`label_hits_cap` targets wasted compute; it equals `reject_reason == "no_submit_answer"`
+except for valid qid 2186 and test qid 1122.
+
+Which label the model trains on is still **unconfirmed by Dr. Wang**. Never hardcode
+one: `src.train.baseline` takes `--label` as a **required** argument, with no default,
+restricted to `BINARY_LABELS`.
 
 ### 4. Node IDs are inconsistently typed
 
@@ -117,8 +134,9 @@ appear across fields, and a mismatch silently yields zero matches rather than an
 ### 5. Evaluation must mirror deployment
 
 - Report **PR-AUC** and **ROC-AUC** together with the instance-level positive rate.
-  Never report accuracy. Random PR-AUC equals the positive rate — about 0.74 for
-  `label_looping` — so read PR-AUC as lift over that.
+  Never report accuracy. Random PR-AUC equals the positive rate — on valid, 0.619 for
+  `label_ever_finds_gold`, 0.062 for `label_gold_still_ahead`, 0.758 for
+  `label_hits_cap` — so read PR-AUC as lift over that.
 - Also report both metrics on the **early subset (t ≤ 10)**. Late prefixes of looping
   runs are trivially easy and dominate full-set numbers; early prefixes are where
   exiting actually saves compute.
@@ -144,6 +162,9 @@ its trajectory's final step, and that `len(steps) == t`. **Any new feature must 
 it.** If a change requires editing that test, stop and ask first — that is the signal
 that something is being rationalised.
 
+`tests/test_labels.py` checks the label definitions against an independent re-derivation
+from raw data, and that no `label_*` key reaches `model_inputs` or any featurizer.
+
 ## Open questions (awaiting Dr. Wang)
 
 1. Which label is the target.
@@ -151,4 +172,5 @@ that something is being rationalised.
 3. Whether subgraphs are intended as model input at all.
 4. Scoring cadence at inference (every step vs. every k).
 
-Until answered: text-only input, per-step scoring, `label_looping` as target.
+Until answered: text-only input, per-step scoring, working target "will the search
+observe ≥ 1 gold node" (§3), with `--label` always passed explicitly.

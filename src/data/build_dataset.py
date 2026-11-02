@@ -20,6 +20,16 @@ from pathlib import Path
 SPLITS = ("train", "valid", "test")
 STEP_KEYS = ("step", "think", "graph", "observation", "valid_action")
 INPUT_KEYS = ("t", "query", "steps")
+# Boolean label columns, i.e. valid training targets. label_first_gold_step is oracle
+# metadata (int or None), not a target.
+BINARY_LABELS = (
+    "label_accepted",
+    "label_hit1",
+    "label_ever_finds_gold",
+    "label_gold_still_ahead",
+    "label_submits_gold",
+    "label_hits_cap",
+)
 # Raw length of a run that exhausted the turn budget; no split has a longer one.
 TURN_CAP_STEPS = 52
 DEFAULT_RAW_DIR = Path(os.environ.get("MAG_DATA", "~/data/mag-trajectories")).expanduser()
@@ -47,9 +57,23 @@ def label_hit1(traj):
     return bool(ranked) and str(ranked[0]) in gold_ids(traj)
 
 
-def label_observed_gold(traj):
+def first_gold_step(traj):
+    """Step number of the first kept step whose observation names a gold id, or None.
+
+    Kept steps are the ones that appear in prefixes (see cutoffs). This is the one
+    place first-sighting matching is done.
+    """
     gold = gold_ids(traj)
-    return any(gold & ids_in_text(s["observation"]) for s in traj["trajectory"])
+    kept = traj["trajectory"][: max(cutoffs(traj["trajectory"]), default=0)]
+    for s in kept:
+        if gold & ids_in_text(s["observation"]):
+            return s["step"]
+    return None
+
+
+def label_submits_gold(traj):
+    submitted = {str(i) for i in traj["final_answer"]["submitted_node_ids"]}
+    return bool(submitted & gold_ids(traj))
 
 
 def hit_turn_cap(traj):
@@ -58,12 +82,20 @@ def hit_turn_cap(traj):
 
 def trajectory_labels(traj):
     quality = traj["quality"]
+    first = first_gold_step(traj)
     return {
         "label_accepted": bool(quality["accepted"]),
         "label_hit1": label_hit1(traj),
-        "label_observed_gold": label_observed_gold(traj),
-        "label_looping": hit_turn_cap(traj),
+        "label_first_gold_step": first,
+        "label_ever_finds_gold": first is not None,
+        "label_submits_gold": label_submits_gold(traj),
+        "label_hits_cap": hit_turn_cap(traj),
     }
+
+
+def gold_still_ahead(labels, t):
+    """True if the run will first sight gold after step t."""
+    return labels["label_ever_finds_gold"] and t < labels["label_first_gold_step"]
 
 
 def prefix_steps(trajectory, t):
@@ -95,6 +127,7 @@ def build_instances(traj):
             "steps": prefix_steps(traj["trajectory"], t),
         }
         row.update(labels)
+        row["label_gold_still_ahead"] = gold_still_ahead(labels, t)
         rows.append(row)
     return rows
 
@@ -116,8 +149,7 @@ def write_jsonl(rows, path):
 
 
 def positive_rates(rows):
-    keys = [k for k in rows[0] if k.startswith("label_")]
-    return {k: sum(r[k] for r in rows) / len(rows) for k in keys}
+    return {k: sum(r[k] for r in rows) / len(rows) for k in BINARY_LABELS}
 
 
 def build_split(raw_dir, out_dir, split):
@@ -139,6 +171,20 @@ def report(split, trajs, rows):
     print(f"       reject reasons: {dict(reject_reasons(trajs).most_common())}")
     capped = [t for t in trajs if hit_turn_cap(t)]
     print(f"       turn-capped: {len(capped)}, by reject reason: {dict(reject_reasons(capped).most_common())}")
+    mid_submits = sum(is_submit(s) for t in trajs for s in t["trajectory"][:-1])
+    print(f"       mid-run submit_answer steps: {mid_submits}")
+    runs = {r["qid"]: r for r in rows}.values()
+    print(f"       runs: ever_finds_gold {sum(r['label_ever_finds_gold'] for r in runs)}, "
+          f"submits_gold {sum(r['label_submits_gold'] for r in runs)}, "
+          f"hits_cap {sum(r['label_hits_cap'] for r in runs)}")
+    firsts = sorted(r["label_first_gold_step"] for r in runs if r["label_ever_finds_gold"])
+    print(f"       first_gold_step (finding runs): median {firsts[len(firsts) // 2]}, "
+          f"p90 {firsts[int(0.9 * len(firsts))]}, max {firsts[-1]}")
+    ahead = Counter(r["t"] for r in rows if r["label_gold_still_ahead"])
+    n_ahead = sum(ahead.values())
+    early = sum(n for t, n in ahead.items() if t <= 8)
+    print(f"       gold_still_ahead: {n_ahead} instances, t=1..10 {[ahead[t] for t in range(1, 11)]}, "
+          f"{100 * early / n_ahead:.1f}% at t<=8")
 
 
 def main():
